@@ -1,0 +1,12 @@
+organs:
+  brain:
+    glb_url: /static/brain/brain.glb
+    diseases:
+      alzheimer:
+        model_dir: models/brain/alzheimer
+        model_file: model.joblib
+        lut_file: lut.csv
+        lut_to_glb_file: mapping_lut_to_glb.csv
+        # optional (if present they’re used)
+        shap_background: shap_background.npy
+        preproc: preproc.json

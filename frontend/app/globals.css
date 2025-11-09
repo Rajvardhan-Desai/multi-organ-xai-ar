@@ -1,0 +1,7 @@
+:root { --bg:#0b0d12; --fg:#e8eef9; --muted:#9fb3c8; --accent:#66d9ef; }
+*{box-sizing:border-box} html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial}
+.card{background:#11161f;border:1px solid #1f2a3a;border-radius:12px;padding:16px}
+.row{display:flex;gap:16px;align-items:flex-start}
+button{background:#1b2432;color:var(--fg);border:1px solid #2b3a55;padding:8px 12px;border-radius:8px;cursor:pointer}
+input[type="file"]{padding:8px}
+a{color:var(--accent)}
