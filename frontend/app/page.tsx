@@ -1,63 +1,59 @@
-"use client";
+'use client';
 
-import { useEffect, useMemo, useState } from "react";
+import dynamic from 'next/dynamic';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+
+const BrainMV = dynamic(() => import('../components/BrainMV'), { ssr: false });
 
 type Registry = { organs: { organ: string; diseases: string[] }[] };
-type Proba = Record<string, number>;
-type PredictionResponse = {
+type TopRegion = { label_id: number; label_name: string; score: number };
+type InferResp = {
   prediction: string;
-  proba: Proba;
+  proba: Record<string, number>;
   icv_mm3: number;
   used_features: string[];
-  top_regions: { label_id: number; label_name: string; score: number }[];
-  xai: null | { method: string; top_regions: { label_id: number; label_name: string; score: number }[] };
+  top_regions: TopRegion[];
+  xai?: { method?: string; top_regions?: TopRegion[] | any };
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "") || "http://localhost:8000";
+type MappingEntry = { target: string; side?: 'L' | 'R' };
+type Mapping = Record<number, MappingEntry[]>;
+
+const API_URL = process.env.NEXT_PUBLIC_API || 'http://localhost:8000';
 
 export default function Page() {
-  const [orgs, setOrgs] = useState<Registry["organs"]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-
-  const [organ, setOrgan] = useState<string>("");
-  const [disease, setDisease] = useState<string>("");
-
+  const [orgs, setOrgs] = useState<Registry['organs']>([]);
+  const [organ, setOrgan] = useState('');
+  const [disease, setDisease] = useState('');
   const [file, setFile] = useState<File | null>(null);
-  const [xai, setXai] = useState<boolean>(true);
+  const [useXai, setUseXai] = useState(true);
 
-  const [pred, setPred] = useState<PredictionResponse | null>(null);
-  const [inferring, setInferring] = useState(false);
-  const [inferErr, setInferErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<InferResp | null>(null);
 
-  // Fetch registry on mount
+  const [mapping, setMapping] = useState<Mapping>({}); // optional mapping for GLB node names
+
+  // Load registry
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      setLoading(true);
-      setErr(null);
       try {
-        const res = await fetch(`${API_BASE}/registry`, { cache: "no-store" });
-        if (!res.ok) throw new Error(`GET /registry ${res.status}`);
-        const json = (await res.json()) as unknown;
+        const r = await fetch(`${API_URL}/registry`);
+        const json: Registry = await r.json();
+        if (cancelled) return;
 
-        const parsed: Registry = {
-          organs: Array.isArray((json as any)?.organs) ? (json as any).organs : [],
-        };
+        const list = Array.isArray(json?.organs) ? json.organs : [];
+        setOrgs(list);
 
-        if (!cancelled) {
-          setOrgs(parsed.organs);
-          // Auto-select first available organ/disease
-          if (parsed.organs.length > 0) {
-            setOrgan(parsed.organs[0].organ);
-            const firstDiseases = parsed.organs[0].diseases || [];
-            if (firstDiseases.length > 0) setDisease(firstDiseases[0]);
-          }
+        // sensible defaults
+        if (list.length) {
+          setOrgan((prev) => prev || list[0].organ);
+          const firstDis = list[0].diseases?.[0] || '';
+          setDisease((prev) => prev || firstDis);
         }
       } catch (e: any) {
-        if (!cancelled) setErr(e?.message || "Failed to load registry");
-      } finally {
-        if (!cancelled) setLoading(false);
+        setError(`Failed to load registry: ${e?.message || e}`);
       }
     })();
     return () => {
@@ -66,142 +62,193 @@ export default function Page() {
   }, []);
 
   // Keep disease in sync when organ changes
-  useEffect(() => {
-    const entry = orgs.find((o) => o.organ === organ);
-    const ds = entry?.diseases ?? [];
-    if (ds.length > 0) {
-      if (!ds.includes(disease)) setDisease(ds[0]);
-    } else {
-      setDisease("");
-    }
-  }, [organ, orgs]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const diseasesForSelected = useMemo(() => {
-    return orgs.find((o) => o.organ === organ)?.diseases ?? [];
+  const diseases = useMemo(() => {
+    const o = orgs.find((x) => x.organ === organ);
+    return o?.diseases || [];
   }, [orgs, organ]);
 
-  const onInfer = async () => {
-    setInferErr(null);
-    setPred(null);
+  useEffect(() => {
+    if (diseases.length && !disease) setDisease(diseases[0]);
+    if (diseases.length && !diseases.includes(disease)) setDisease(diseases[0]);
+  }, [diseases, disease]);
+
+  // Optional: load mapping file if you placed one at /public/static/mapping.json
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/static/mapping.json', { cache: 'no-store' });
+        if (!res.ok) return; // file optional
+        const m = (await res.json()) as Mapping;
+        if (!cancelled) setMapping(m || {});
+      } catch {
+        // ignore — mapping is optional
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // After inference, auto-highlight all affected regions and fade others
+  const spotlight = useCallback((resp: InferResp | null) => {
+    if (!resp) return;
+    const src = resp.top_regions?.length ? resp.top_regions : resp.xai?.top_regions || [];
+    const ids = Array.isArray(src) ? src.map((r: any) => r.label_id).filter(Boolean) : [];
+
+    const names = Array.isArray(src) ? src.map((r: any) => r.label_name).filter(Boolean) : [];
+
+    const fire = () =>
+      window.dispatchEvent(
+        new CustomEvent('highlight-rois', {
+          detail: {
+            label_ids: ids,
+            label_names: names,
+            exclusive: true, // dim all others
+          },
+        })
+      );
+
+    // If viewer has already loaded:
+    if ((window as any).__brainReady) fire();
+    else window.addEventListener('brain-ready', () => fire(), { once: true });
+  }, []);
+
+  // Submit for inference
+  const onInfer = useCallback(async () => {
+    setError(null);
+    setResult(null);
     if (!file) {
-      setInferErr("Please choose a .nii.gz segmentation file.");
+      setError('Please choose a .nii.gz segmentation file.');
       return;
     }
     if (!organ || !disease) {
-      setInferErr("Please select an organ and disease.");
+      setError('Select organ and disease first.');
       return;
     }
-    setInferring(true);
+
     try {
-      const form = new FormData();
-      form.append("file", file);
-      const url = `${API_BASE}/infer?organ=${encodeURIComponent(organ)}&disease=${encodeURIComponent(
-        disease
-      )}&xai=${xai ? "1" : "0"}`;
-      const res = await fetch(url, { method: "POST", body: form });
-      const json = await res.json();
+      setLoading(true);
+      const fd = new FormData();
+      fd.append('file', file, file.name);
+
+      const res = await fetch(
+        `${API_URL}/infer?organ=${encodeURIComponent(organ)}&disease=${encodeURIComponent(
+          disease
+        )}&xai=${useXai ? 1 : 0}`,
+        { method: 'POST', body: fd }
+      );
+
       if (!res.ok) {
-        throw new Error(json?.detail || "Inference failed");
+        const msg = await res.text();
+        throw new Error(`Backend error ${res.status}: ${msg}`);
       }
-      setPred(json as PredictionResponse);
+      const json = (await res.json()) as InferResp;
+      setResult(json);
+      // kick the 3D highlight
+      spotlight(json);
     } catch (e: any) {
-      setInferErr(e?.message || "Inference failed");
+      setError(e?.message || String(e));
     } finally {
-      setInferring(false);
+      setLoading(false);
     }
-  };
+  }, [file, organ, disease, useXai, spotlight]);
 
   return (
-    <main className="p-6 max-w-5xl mx-auto">
-      <h1 className="text-2xl font-semibold mb-4">Model Registry</h1>
+    <main className="min-h-screen bg-slate-100 text-slate-900">
+      <div className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+        <h1 className="text-2xl font-semibold">Model Registry</h1>
 
-      {/* Registry state */}
-      {loading && <div className="mb-4 text-sm text-gray-500">Loading registry…</div>}
-      {err && (
-        <div className="mb-4 text-sm text-red-600">
-          {err} &nbsp; <code className="text-xs">API_BASE={API_BASE}</code>
+        {/* Controls */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Organ */}
+          <div className="flex flex-col gap-1">
+            <label className="text-sm text-slate-600">Organ</label>
+            <select
+              value={organ}
+              onChange={(e) => setOrgan(e.target.value)}
+              className="border rounded px-3 py-2 bg-white"
+            >
+              {orgs.map((o) => (
+                <option key={o.organ} value={o.organ}>
+                  {o.organ}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Disease */}
+          <div className="flex flex-col gap-1">
+            <label className="text-sm text-slate-600">Disease</label>
+            <select
+              value={disease}
+              onChange={(e) => setDisease(e.target.value)}
+              className="border rounded px-3 py-2 bg-white"
+            >
+              {diseases.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* XAI */}
+          <div className="flex items-end">
+            <label className="inline-flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={useXai}
+                onChange={(e) => setUseXai(e.target.checked)}
+              />
+              Explainable AI (feature importance)
+            </label>
+          </div>
         </div>
-      )}
-      {!loading && !err && orgs.length === 0 && (
-        <div className="mb-4 text-sm text-amber-600">No models registered.</div>
-      )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
-        {/* Organ */}
-        <div>
-          <label className="block text-sm mb-1">Organ</label>
-          <select
-            className="border rounded px-3 py-2 w-full"
-            value={organ}
-            onChange={(e) => setOrgan(e.target.value)}
-            disabled={orgs.length === 0}
-          >
-            {orgs.map((o) => (
-              <option key={o.organ} value={o.organ}>
-                {o.organ}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* Disease */}
-        <div>
-          <label className="block text-sm mb-1">Disease</label>
-          <select
-            className="border rounded px-3 py-2 w-full"
-            value={disease}
-            onChange={(e) => setDisease(e.target.value)}
-            disabled={diseasesForSelected.length === 0}
-          >
-            {diseasesForSelected.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* XAI toggle */}
-        <div className="flex items-center gap-2">
-          <input id="xai" type="checkbox" checked={xai} onChange={(e) => setXai(e.target.checked)} />
-          <label htmlFor="xai" className="text-sm">
-            Explainable AI (feature importance)
+        {/* Upload + Infer */}
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex-1">
+            <div className="text-sm text-slate-600 mb-1">Segmentation (.nii.gz)</div>
+            <input
+              type="file"
+              accept=".nii,.nii.gz"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              className="block w-full"
+            />
           </label>
+
+          <button
+            onClick={onInfer}
+            disabled={loading || !file || !organ || !disease}
+            className="px-4 py-2 rounded bg-indigo-600 text-white disabled:bg-indigo-300"
+          >
+            {loading ? 'Running…' : 'Run Inference'}
+          </button>
+
+          {file && (
+            <div className="text-xs text-slate-600 truncate max-w-[40ch]">{file.name}</div>
+          )}
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="px-3 py-2 rounded bg-red-50 text-red-700 border border-red-200">
+            {error}
+          </div>
+        )}
+
+        {/* 3D viewer */}
+        <BrainMV mapping={mapping} />
+
+        {/* JSON result */}
+        <div className="bg-white border rounded-xl p-4">
+          <div className="text-sm font-medium mb-2">Prediction</div>
+          <pre className="text-xs overflow-auto">
+            {result ? JSON.stringify(result, null, 2) : '—'}
+          </pre>
         </div>
       </div>
-
-      {/* File input */}
-      <div className="mt-6">
-        <label className="block text-sm mb-1">Segmentation (.nii.gz)</label>
-        <input
-          type="file"
-          accept=".nii,.nii.gz"
-          onChange={(e) => setFile(e.target.files?.[0] || null)}
-          className="border rounded px-3 py-2 w-full"
-        />
-      </div>
-
-      {/* Infer */}
-      <div className="mt-4 flex gap-3">
-        <button
-          onClick={onInfer}
-          disabled={!file || !organ || !disease || inferring}
-          className="bg-black text-white rounded px-4 py-2 disabled:opacity-50"
-        >
-          {inferring ? "Running…" : "Run Inference"}
-        </button>
-        {inferErr && <span className="text-sm text-red-600">{inferErr}</span>}
-      </div>
-
-      {/* Result */}
-      {pred && (
-        <section className="mt-8">
-          <h2 className="text-xl font-semibold mb-2">Prediction</h2>
-          <pre className="text-xs bg-gray-100 p-3 rounded overflow-auto">
-{JSON.stringify(pred, null, 2)}
-          </pre>
-        </section>
-      )}
     </main>
   );
 }

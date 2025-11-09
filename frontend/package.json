@@ -7,13 +7,14 @@
     "start": "next start -p 3000"
   },
   "dependencies": {
+    "@google/model-viewer": "^4.1.0",
     "@react-three/drei": "^9.103.2",
     "@react-three/fiber": "^8.15.18",
     "axios": "^1.7.7",
     "next": "14.2.13",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "three": "^0.160.0"
+    "three": "^0.172.0"
   },
   "devDependencies": {
     "@types/node": "24.10.0",
