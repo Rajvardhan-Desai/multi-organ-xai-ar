@@ -1,3 +1,4 @@
+import "./globals.css";
 export const metadata = {
   title: "EX-AI-AR",
   description: "Explainable AI + AR viewer"
