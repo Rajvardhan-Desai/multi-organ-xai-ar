@@ -142,19 +142,34 @@ async def infer(
         # Accept ED/ES separately; allow fallback: single file used as both
         if ed_file is None and file is None:
             raise HTTPException(400, "Provide ed_file and es_file or a single 'file' for fallback.")
+
         try:
+            # read uploads safely (never read the same stream twice)
             if ed_file is not None:
                 ed_bytes = await ed_file.read()
-                es_bytes = await (es_file.read() if es_file is not None else ed_file.read())
+                if not ed_bytes:
+                    raise HTTPException(400, "ED mask upload is empty.")
+                if es_file is not None:
+                    es_bytes = await es_file.read()
+                    if not es_bytes:
+                        raise HTTPException(400, "ES mask upload is empty.")
+                else:
+                    # reuse ED bytes if ES not provided
+                    es_bytes = ed_bytes
             else:
-                # fallback: 'file' is reused for ES
+                # fallback single file used for both ED and ES
                 fb = await file.read()  # type: ignore[arg-type]
+                if not fb:
+                    raise HTTPException(400, "Upload is empty.")
                 ed_bytes = fb
                 es_bytes = fb
 
             model_dir = MODELS[key]["_model_dir"]
             payload = predict_heart_cardio(model_dir, ed_bytes, es_bytes, want_xai=xai)
             return payload
+
+        except HTTPException:
+            raise
         except Exception as e:
             return JSONResponse(status_code=500, content={"detail": f"Inference error: {e}"})
 
@@ -163,27 +178,32 @@ async def infer(
         raise HTTPException(400, "Provide 'file' (.nii/.nii.gz) for brain inference.")
     if key not in LUTS:
         raise HTTPException(500, "LUT not loaded for this brain model.")
+
     try:
-      contents = await file.read()
-      with tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False) as tmp:
-          tmp.write(contents)
-          tmp_path = tmp.name
-      try:
-          img = nib.load(tmp_path)
-          bundle = MODELS[key]
-          lut = LUTS[key]
-          result = predict(
-              bundle=bundle,
-              seg_img=img,
-              lut=lut,
-              produce_xai=xai,
-              class_name_map=bundle.get("_class_name_map"),
-          )
-          return result
-      finally:
-          try:
-              os.remove(tmp_path)
-          except Exception:
-              pass
+        contents = await file.read()
+        if not contents:
+            raise HTTPException(400, "Upload is empty.")
+        with tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False) as tmp:
+            tmp.write(contents)
+            tmp_path = tmp.name
+        try:
+            img = nib.load(tmp_path)
+            bundle = MODELS[key]
+            lut = LUTS[key]
+            result = predict(
+                bundle=bundle,
+                seg_img=img,
+                lut=lut,
+                produce_xai=xai,
+                class_name_map=bundle.get("_class_name_map"),
+            )
+            return result
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+    except HTTPException:
+        raise
     except Exception as e:
         return JSONResponse(status_code=500, content={"detail": f"Inference error: {e}"})

@@ -1,24 +1,24 @@
 {
   "segments": {
-    "1": ["Left surface of heart.j"],
-    "2": ["Interatrial septum.j"],
-    "3": ["Interatrial septum.t"],
-    "4": ["Inferior surface of heart.j"],
-    "5": ["Left surface of heart.t"],
-    "6": ["Anterior surface of heart.j"],
-    "7": ["Anterior papillary muscle of right ventricle"],
-    "8": ["Septal papillary muscle of right ventricle"],
-    "9": ["Inferior papillary muscle of right ventricle"],
-    "10": ["Inferior surface of heart.t"],
-    "11": ["Right surface of heart.j"],
-    "12": ["Right surface of heart.t"],
-    "13": ["Anterior surface of heart.t"],
-    "14": ["Interatrial septum.t"],
-    "15": ["Inferior surface of heart.j"],
-    "16": ["Left surface of heart.j"]
+    "1": ["Left_surface_of_heartj"],
+    "2": ["Interatrial_septumj"],
+    "3": ["Interatrial_septumt"],
+    "4": ["Inferior_surface_of_heartj"],
+    "5": ["Left_surface_of_heartt"],
+    "6": ["Anterior_surface_of_heartj"],
+    "7": ["Anterior_papillary_muscle_of_right_ventricle"],
+    "8": ["Septal_papillary_muscle_of_right_ventricle"],
+    "9": ["Inferior_papillary_muscle_of_right_ventricle"],
+    "10": ["Inferior_surface_of_heartt"],
+    "11": ["Right_surface_of_heartj"],
+    "12": ["Right_surface_of_heartt"],
+    "13": ["Anterior_surface_of_heartt"],
+    "14": ["Interatrial_septumt"],
+    "15": ["Inferior_surface_of_heartj"],
+    "16": ["Left_surface_of_heartj"]
   },
   "groups": {
-    "LV": ["Left ventricle","Valvular complex of heart.j","Valvular complex of heart.g"],
-    "RV": ["Right ventricle"]
+    "LV": ["Left_ventricle", "Valvular_complex_of_heartj", "Valvular_complex_of_heartg"],
+    "RV": ["Right_ventricle"]
   }
 }

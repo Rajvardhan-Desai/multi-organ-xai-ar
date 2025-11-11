@@ -3,7 +3,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 
-// Dynamically load viewers on the client only
 const BrainMV = dynamic(() => import("../components/BrainMV"), { ssr: false });
 const HeartMV = dynamic(() => import("../components/HeartMV"), { ssr: false });
 
@@ -13,37 +12,28 @@ type RegistryPayload = { organs: { organ: string; diseases: string[] }[] };
 
 type TopRegion = { label_id: number; label_name: string; score: number };
 type InferResponse = {
-  // shared
   prediction: string;
   proba: Record<string, number>;
   used_features?: string[];
-
-  // brain-legacy
   icv_mm3?: number;
   top_regions?: TopRegion[];
   xai?: { method: string; top_regions?: TopRegion[] };
-
-  // heart
-  segment_scores?: Record<string, number>; // "1".."16" -> 0..1
+  segment_scores?: Record<string, number>;
 };
 
 export default function Page() {
   const [orgs, setOrgs] = useState<{ organ: string; diseases: string[] }[]>([]);
   const [organ, setOrgan] = useState("");
   const [disease, setDisease] = useState("");
-
-  // Inputs
-  const [file, setFile] = useState<File | null>(null);     // brain single file
-  const [edFile, setEdFile] = useState<File | null>(null); // heart ED mask
-  const [esFile, setEsFile] = useState<File | null>(null); // heart ES mask
+  const [file, setFile] = useState<File | null>(null);
+  const [edFile, setEdFile] = useState<File | null>(null);
+  const [esFile, setEsFile] = useState<File | null>(null);
   const [xai, setXai] = useState(true);
 
-  // UI state
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<InferResponse | null>(null);
 
-  // Fetch registry (with fallback)
   useEffect(() => {
     let ok = true;
     (async () => {
@@ -89,7 +79,6 @@ export default function Page() {
 
   useEffect(() => {
     if (!diseases.includes(disease)) setDisease(diseases[0] ?? "");
-    // reset inputs when organ changes
     setResult(null);
     setError(null);
     setFile(null);
@@ -104,27 +93,15 @@ export default function Page() {
     setResult(null);
 
     try {
-      const qs = new URLSearchParams({
-        organ,
-        disease,
-        xai: xai ? "1" : "0",
-      });
-
+      const qs = new URLSearchParams({ organ, disease, xai: xai ? "1" : "0" });
       const fd = new FormData();
 
       if (organ === "heart") {
-        // Prefer ED+ES masks; allow fallback: single ED used as both
-        if (!edFile && !file) {
-          throw new Error("Please choose ED mask (.nii/.nii.gz) for heart.");
-        }
+        if (!edFile && !file) throw new Error("Please choose ED mask (.nii/.nii.gz) for heart.");
         if (edFile) fd.append("ed_file", edFile);
         if (esFile) fd.append("es_file", esFile ?? edFile ?? (file as File));
-        if (!edFile && file) {
-          // fallback to legacy single-file param accepted by backend
-          fd.append("file", file);
-        }
+        if (!edFile && file) fd.append("file", file);
       } else {
-        // brain (single segmentation file)
         if (!file) throw new Error("Please choose a segmentation file (.nii/.nii.gz).");
         fd.append("file", file);
       }
@@ -157,7 +134,6 @@ export default function Page() {
     <main className="min-h-screen p-6 flex flex-col gap-6 bg-white">
       <h1 className="text-2xl font-semibold">EX-AI-AR — Multi-organ</h1>
 
-      {/* Organ / disease / XAI */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div>
           <label className="block text-sm font-medium mb-1">Organ</label>
@@ -189,7 +165,7 @@ export default function Page() {
           </select>
         </div>
 
-        <div className="flex items-end">
+        <div className="flex items-end justify-between gap-3">
           <label className="inline-flex items-center gap-2">
             <input
               type="checkbox"
@@ -198,36 +174,33 @@ export default function Page() {
             />
             <span>Explainable AI</span>
           </label>
+
+          {/* Debug button to dump names to console */}
+          {organ === "heart" && (
+            <button
+              type="button"
+              className="text-xs border px-2 py-1 rounded"
+              onClick={() => (window as any).heartDump?.()}
+              title="Logs all GLB names to console"
+            >
+              Debug: Dump GLB names
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Inputs */}
       {organ === "heart" ? (
         <div className="flex flex-col lg:flex-row items-start gap-4">
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium">ED mask (.nii/.nii.gz)</label>
-            <input
-              type="file"
-              accept=".nii,.nii.gz"
-              onChange={(e) => setEdFile(e.target.files?.[0] ?? null)}
-            />
+            <input type="file" accept=".nii,.nii.gz" onChange={(e) => setEdFile(e.target.files?.[0] ?? null)} />
           </div>
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium">ES mask (.nii/.nii.gz)</label>
-            <input
-              type="file"
-              accept=".nii,.nii.gz"
-              onChange={(e) => setEsFile(e.target.files?.[0] ?? null)}
-            />
-            <div className="text-xs text-gray-500">
-              Optional — if omitted, ED will be reused (reduced EF quality).
-            </div>
+            <input type="file" accept=".nii,.nii.gz" onChange={(e) => setEsFile(e.target.files?.[0] ?? null)} />
+            <div className="text-xs text-gray-500">Optional — if omitted, ED will be reused.</div>
           </div>
-          <button
-            className="bg-black text-white rounded px-4 py-2 disabled:opacity-50"
-            onClick={onInfer}
-            disabled={busy || (!edFile && !file)}
-          >
+          <button className="bg-black text-white rounded px-4 py-2 disabled:opacity-50" onClick={onInfer} disabled={busy || (!edFile && !file)}>
             {busy ? "Running…" : "Run Inference"}
           </button>
         </div>
@@ -235,43 +208,24 @@ export default function Page() {
         <div className="flex flex-col md:flex-row items-start gap-3">
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium">Segmentation (.nii/.nii.gz)</label>
-            <input
-              type="file"
-              accept=".nii,.nii.gz"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
+            <input type="file" accept=".nii,.nii.gz" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </div>
-          <button
-            className="bg-black text-white rounded px-4 py-2 disabled:opacity-50"
-            onClick={onInfer}
-            disabled={busy || !file}
-          >
+          <button className="bg-black text-white rounded px-4 py-2 disabled:opacity-50" onClick={onInfer} disabled={busy || !file}>
             {busy ? "Running…" : "Run Inference"}
           </button>
         </div>
       )}
 
-      {/* Errors */}
-      {error && (
-        <div className="text-red-600 text-sm border border-red-200 bg-red-50 p-3 rounded">
-          {error}
-        </div>
-      )}
+      {error && <div className="text-red-600 text-sm border border-red-200 bg-red-50 p-3 rounded">{error}</div>}
 
-      {/* Viewer */}
       <div className="border rounded-lg p-3">
         {organ === "heart" ? (
-          <HeartMV
-  segmentScores={result?.segment_scores ?? {}}
-  topK={8}
-  threshold={0.25}
-/>
+          <HeartMV segmentScores={result?.segment_scores ?? {}} topK={8} threshold={0.25} />
         ) : (
           <BrainMV affected={(affectedBrain ?? []).slice(0, 3)} />
         )}
       </div>
 
-      {/* Results */}
       {result && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div>
@@ -287,7 +241,7 @@ export default function Page() {
             </h2>
             {organ === "heart" ? (
               <ul className="text-sm list-disc pl-6">
-                {Object.entries(segScoresHeart)
+                {Object.entries(result?.segment_scores ?? {})
                   .sort(([a], [b]) => Number(a) - Number(b))
                   .map(([sid, sc]) => (
                     <li key={sid}>
