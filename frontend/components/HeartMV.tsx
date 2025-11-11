@@ -8,38 +8,72 @@ import * as THREE from "three";
 type Mapping = { segments: Record<string, string[]> };
 
 type Props = {
-  /** AHA16 scores: "1".."16" -> 0..1 */
   segmentScores: Record<string, number>;
-  /** Top-K segments to highlight (sorted by score desc). Default: 8 */
   topK?: number;
-  /** Minimum score to highlight (0..1). Default: 0.25 */
   threshold?: number;
-  /** GLB URL */
   src?: string;
-  /** Mapping URL (JSON with { segments: { "1": ["Node name", ...], ... }}) */
   mappingUrl?: string;
-  /** Base fade opacity for non-highlighted meshes */
-  opacity?: number;
+  opacity?: number; // non-highlight fade
 };
 
 const DEFAULT_GLB = "/static/heart/heart.glb";
 const DEFAULT_MAPPING = "/static/heart/mapping.json";
 
-/** Normalize a name for fuzzy comparisons */
+// ---------- name helpers ----------
 const norm = (s: string) =>
   s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/g, " ").trim();
 
-/** Generate a few common export variants (strip .t/.j etc.) */
 const variants = (raw: string) => {
   const base = raw.trim();
   const out = new Set<string>([
     base,
-    base.replace(/\.(t|j)$/i, ""),
+    base.replace(/\.(t|j|g)$/i, ""), // strip .t/.j/.g
     base.replace(/\s*\(mesh\)\s*$/i, ""),
-    base.replace(/\.(t|j)$/i, "").replace(/\s*\(mesh\)\s*$/i, ""),
+    base.replace(/\.(t|j|g)$/i, "").replace(/\s*\(mesh\)\s*$/i, ""),
   ]);
   return [...out];
 };
+
+// ---------- material helpers ----------
+function cloneMat(mat: THREE.Material) {
+  const c = mat.clone ? mat.clone() : mat;
+  (c as any).__heartMV = true;
+  return c;
+}
+
+// Per-mesh material instancing (run once)
+function instanceAllMeshMaterials(root: THREE.Object3D) {
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    if (Array.isArray(mesh.material)) {
+      mesh.material = mesh.material.map((m) =>
+        m && !(m as any).__heartMV ? cloneMat(m) : m
+      );
+    } else if (mesh.material && !(mesh.material as any).__heartMV) {
+      mesh.material = cloneMat(mesh.material);
+    }
+  });
+}
+
+function setFade(mat: THREE.Material, opacity: number) {
+  const m = mat as THREE.MeshStandardMaterial;
+  if (!m) return;
+  m.transparent = true;
+  m.opacity = opacity;
+  if ((m as any).emissive) (m as any).emissive.setRGB(0, 0, 0);
+  if (m.color) m.color.setRGB(1, 1, 1);
+}
+
+function setHighlight(mat: THREE.Material, intensity: number) {
+  const m = mat as THREE.MeshStandardMaterial;
+  if (!m) return;
+  const t = Math.max(0, Math.min(1, intensity));
+  m.transparent = false;
+  m.opacity = 1;
+  if (m.color) m.color.setRGB(1, 0.25, 0.25);
+  if ((m as any).emissive) (m as any).emissive.setRGB(0.6 * t, 0.1 * t, 0.1 * t);
+}
 
 function HeartScene({
   segmentScores,
@@ -52,10 +86,13 @@ function HeartScene({
   const groupRef = useRef<THREE.Group>(null!);
   const gltf = useGLTF(src);
   const [nameIndex, setNameIndex] = useState<Map<string, THREE.Object3D>>(new Map());
-  const [allNames, setAllNames] = useState<string[]>([]);
 
-  // Build a name -> Object3D index for fast lookups.
+  // Build index + instance materials (once)
   useEffect(() => {
+    if (!gltf?.scene) return;
+
+    instanceAllMeshMaterials(gltf.scene);
+
     const idx = new Map<string, THREE.Object3D>();
     const names: string[] = [];
     gltf.scene.traverse((obj) => {
@@ -64,9 +101,8 @@ function HeartScene({
       names.push(obj.name);
     });
     setNameIndex(idx);
-    setAllNames(names);
 
-    // expose debug dumper
+    // debug helper
     (window as any).heartDump = () => {
       const sorted = [...names].sort((a, b) => a.localeCompare(b));
       console.groupCollapsed("HeartMV — GLB node names");
@@ -76,73 +112,47 @@ function HeartScene({
     };
   }, [gltf.scene]);
 
-  // compute top-k affected entries from scores (id, score)
+  // top-K segments
   const affected = useMemo(() => {
     const pairs = Object.entries(segmentScores || {})
       .filter(([, s]) => typeof s === "number" && !Number.isNaN(s))
-      .sort((a, b) => b[1] - a[1]) // desc
+      .sort((a, b) => b[1] - a[1])
       .slice(0, topK)
       .filter(([, s]) => s >= threshold);
     return pairs.map(([sid, score]) => ({
       id: sid,
       score: Math.max(0, Math.min(1, Number(score))),
-      label: `AHA${sid}`,
     }));
   }, [segmentScores, topK, threshold]);
 
-  // Build target map: nodeName -> intensity
+  // target map: rawName -> intensity
   const targets = useMemo(() => {
     const map = new Map<string, number>();
     if (!mapping) return map;
-
     for (const { id, score } of affected) {
-      const entries = mapping.segments?.[id] ?? [];
-      for (const raw of entries) {
-        const name = String(raw || "").trim();
-        if (!name) continue;
-        map.set(name, Math.max(score, map.get(name) ?? 0));
+      const items = mapping.segments?.[id] ?? [];
+      for (const raw of items) {
+        const nm = (raw || "").trim();
+        if (!nm) continue;
+        map.set(nm, Math.max(score, map.get(nm) ?? 0));
       }
     }
     return map;
   }, [affected, mapping]);
 
-  // Helper: apply fade to a mesh/material
-  const fadeMat = (mat: THREE.Material) => {
-    const m = mat as THREE.MeshStandardMaterial;
-    if (!m) return;
-    m.transparent = true;
-    m.opacity = opacity;
-    m.emissive?.setRGB(0, 0, 0);
-    m.color?.setRGB(1, 1, 1);
-  };
-
-  // Helper: apply highlight to a mesh/material
-  const lightMat = (mat: THREE.Material, intensity = 1) => {
-    const m = mat as THREE.MeshStandardMaterial;
-    if (!m) return;
-    const t = Math.max(0, Math.min(1, intensity));
-    m.transparent = false;
-    m.opacity = 1;
-    m.color?.setRGB(1, 0.25, 0.25);
-    if ((m as any).emissive) (m as any).emissive.setRGB(0.6 * t, 0.1 * t, 0.1 * t);
-  };
-
-  // Helper: highlight a node (including descendants if it's a Group/empty).
   const highlightNode = (node: THREE.Object3D, intensity: number) => {
     node.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
-      if (mesh.isMesh) {
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        mats.forEach((mtl) => mtl && lightMat(mtl, intensity));
-      }
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      mats.forEach((mtl) => mtl && setHighlight(mtl, intensity));
     });
   };
 
-  // Resolve a single target name to a node by exact/variant/fuzzy match.
   const resolveTarget = (raw: string): THREE.Object3D | null => {
     // exact
-    const exact = nameIndex.get(raw);
-    if (exact) return exact;
+    const e = nameIndex.get(raw);
+    if (e) return e;
     // variants
     for (const v of variants(raw)) {
       const hit = nameIndex.get(v);
@@ -157,49 +167,38 @@ function HeartScene({
     return null;
   };
 
-  // On every relevant change, fade everything and then highlight targets
+  // fade all then highlight
   useEffect(() => {
     if (!gltf?.scene) return;
 
-    // 1) fade all meshes
     gltf.scene.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
-      if (mesh.isMesh) {
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        mats.forEach((mtl) => mtl && fadeMat(mtl));
-      }
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      mats.forEach((mtl) => mtl && setFade(mtl, opacity));
     });
 
-    // 2) highlight resolved targets
     const misses: string[] = [];
     for (const [raw, w] of targets.entries()) {
       const node = resolveTarget(raw);
-      if (node) {
-        highlightNode(node, w);
-      } else {
-        misses.push(raw);
-      }
+      if (node) highlightNode(node, w);
+      else misses.push(raw);
     }
-
     if (misses.length) {
       console.warn(
         `HeartMV: ${misses.length} map target(s) not found in GLB. First few:`,
         misses.slice(0, 20)
       );
-      // Tip: run window.heartDump() and paste the exact names into mapping.json
     }
   }, [gltf.scene, targets, nameIndex, opacity]);
 
-  // small idle rotation for a bit of life (optional)
-  useFrame((_, delta) => {
-    if (groupRef.current) {
-      groupRef.current.rotation.y += delta * 0.05;
-    }
+  // gentle rotation
+  useFrame((_, d) => {
+    if (groupRef.current) groupRef.current.rotation.y += d * 0.05;
   });
 
   return (
     <group ref={groupRef} dispose={null}>
-      {/* Render loaded glTF */}
       <primitive object={gltf.scene} />
     </group>
   );
@@ -216,19 +215,18 @@ export default function HeartMV({
   const [mapping, setMapping] = useState<Mapping | null>(null);
 
   useEffect(() => {
-    let on = true;
+    let alive = true;
     (async () => {
       try {
         const r = await fetch(mappingUrl);
         const m = (await r.json()) as Mapping;
-        if (!on) return;
-        setMapping(m);
+        if (alive) setMapping(m);
       } catch (e) {
         console.error("HeartMV: failed to load mapping.json", e);
       }
     })();
     return () => {
-      on = false;
+      alive = false;
     };
   }, [mappingUrl]);
 
@@ -243,7 +241,7 @@ export default function HeartMV({
             segmentScores={segmentScores}
             topK={topK}
             threshold={threshold}
-            src={src!}
+            src={src}
             mapping={mapping}
             opacity={opacity}
           />
@@ -254,5 +252,4 @@ export default function HeartMV({
   );
 }
 
-// Helpful for static analysis tools
 useGLTF.preload(DEFAULT_GLB);
