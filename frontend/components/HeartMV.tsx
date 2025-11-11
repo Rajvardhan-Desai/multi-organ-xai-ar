@@ -1,25 +1,33 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, ThreeEvent } from "@react-three/fiber";
 import { OrbitControls, useGLTF, Bounds, Environment } from "@react-three/drei";
 import * as THREE from "three";
 
 type Mapping = { segments: Record<string, string[]> };
 
 type Props = {
+  /** AHA16 scores: "1".."16" -> 0..1 */
   segmentScores: Record<string, number>;
+  /** Top-K segments to highlight (sorted by score desc). Default: 8 */
   topK?: number;
+  /** Minimum score to highlight (0..1). Default: 0.25 */
   threshold?: number;
+  /** GLB URL */
   src?: string;
+  /** Mapping URL (JSON with { segments: { "1": ["Node name", ...], ... }}) */
   mappingUrl?: string;
-  opacity?: number; // non-highlight fade
+  /** Base fade opacity for non-highlighted meshes */
+  opacity?: number;
+  /** Optional overall prediction to display in the info panel */
+  overallPrediction?: string;
 };
 
 const DEFAULT_GLB = "/static/heart/heart.glb";
 const DEFAULT_MAPPING = "/static/heart/mapping.json";
 
-// ---------- name helpers ----------
+// ---- name helpers ----------------------------------------------------------
 const norm = (s: string) =>
   s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/g, " ").trim();
 
@@ -27,21 +35,19 @@ const variants = (raw: string) => {
   const base = raw.trim();
   const out = new Set<string>([
     base,
-    base.replace(/\.(t|j|g)$/i, ""), // strip .t/.j/.g
+    base.replace(/\.(t|j|g)$/i, ""),
     base.replace(/\s*\(mesh\)\s*$/i, ""),
     base.replace(/\.(t|j|g)$/i, "").replace(/\s*\(mesh\)\s*$/i, ""),
   ]);
   return [...out];
 };
 
-// ---------- material helpers ----------
+// ---- material helpers (clone per mesh to avoid global tinting) -------------
 function cloneMat(mat: THREE.Material) {
   const c = mat.clone ? mat.clone() : mat;
   (c as any).__heartMV = true;
   return c;
 }
-
-// Per-mesh material instancing (run once)
 function instanceAllMeshMaterials(root: THREE.Object3D) {
   root.traverse((obj) => {
     const mesh = obj as THREE.Mesh;
@@ -55,7 +61,6 @@ function instanceAllMeshMaterials(root: THREE.Object3D) {
     }
   });
 }
-
 function setFade(mat: THREE.Material, opacity: number) {
   const m = mat as THREE.MeshStandardMaterial;
   if (!m) return;
@@ -64,7 +69,6 @@ function setFade(mat: THREE.Material, opacity: number) {
   if ((m as any).emissive) (m as any).emissive.setRGB(0, 0, 0);
   if (m.color) m.color.setRGB(1, 1, 1);
 }
-
 function setHighlight(mat: THREE.Material, intensity: number) {
   const m = mat as THREE.MeshStandardMaterial;
   if (!m) return;
@@ -75,6 +79,14 @@ function setHighlight(mat: THREE.Material, intensity: number) {
   if ((m as any).emissive) (m as any).emissive.setRGB(0.6 * t, 0.1 * t, 0.1 * t);
 }
 
+// ---- internal selection type ----------------------------------------------
+type Selection = {
+  nodeName: string;
+  segmentId?: string;   // "1".."16" if found
+  score?: number;       // 0..1
+};
+
+// ---- Scene -----------------------------------------------------------------
 function HeartScene({
   segmentScores,
   topK,
@@ -82,12 +94,19 @@ function HeartScene({
   src,
   mapping,
   opacity,
-}: Required<Omit<Props, "mappingUrl">> & { mapping: Mapping | null }) {
+  onSelect,
+}: Required<Omit<Props, "mappingUrl" | "overallPrediction">> & {
+  mapping: Mapping | null;
+  onSelect: (sel: Selection | null) => void;
+}) {
   const groupRef = useRef<THREE.Group>(null!);
   const gltf = useGLTF(src);
-  const [nameIndex, setNameIndex] = useState<Map<string, THREE.Object3D>>(new Map());
 
-  // Build index + instance materials (once)
+  const [nameIndex, setNameIndex] = useState<Map<string, THREE.Object3D>>(new Map());
+  // hitIndex: normalizedMeshName -> set of segment IDs that include it
+  const [hitIndex, setHitIndex] = useState<Map<string, Set<string>>>(new Map());
+
+  // Build name index + ensure independent materials (once)
   useEffect(() => {
     if (!gltf?.scene) return;
 
@@ -102,7 +121,6 @@ function HeartScene({
     });
     setNameIndex(idx);
 
-    // debug helper
     (window as any).heartDump = () => {
       const sorted = [...names].sort((a, b) => a.localeCompare(b));
       console.groupCollapsed("HeartMV — GLB node names");
@@ -112,7 +130,50 @@ function HeartScene({
     };
   }, [gltf.scene]);
 
-  // top-K segments
+  // resolve mapping raw target -> actual node in GLB
+  const resolveTarget = (raw: string): THREE.Object3D | null => {
+    const e = nameIndex.get(raw);
+    if (e) return e;
+    for (const v of variants(raw)) {
+      const hit = nameIndex.get(v);
+      if (hit) return hit;
+    }
+    const t = norm(raw);
+    for (const [name, obj] of nameIndex) {
+      const n = norm(name);
+      if (n === t || n.includes(t) || t.includes(n)) return obj;
+    }
+    return null;
+  };
+
+  // Precompute a "hit index": for each mapped segment, add all descendant mesh names
+  useEffect(() => {
+    if (!mapping || nameIndex.size === 0) return;
+
+    const hi = new Map<string, Set<string>>();
+
+    const add = (meshName: string, sid: string) => {
+      const key = norm(meshName);
+      if (!hi.has(key)) hi.set(key, new Set());
+      hi.get(key)!.add(sid);
+    };
+
+    for (const [sid, arr] of Object.entries(mapping.segments || {})) {
+      for (const raw of arr || []) {
+        const node = resolveTarget(raw);
+        if (!node) continue;
+        node.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (mesh.isMesh && mesh.name) add(mesh.name, sid);
+        });
+        // also index the group node name itself
+        if (node.name) add(node.name, sid);
+      }
+    }
+    setHitIndex(hi);
+  }, [mapping, nameIndex]);
+
+  // compute top-k segments (id, score) from scores
   const affected = useMemo(() => {
     const pairs = Object.entries(segmentScores || {})
       .filter(([, s]) => typeof s === "number" && !Number.isNaN(s))
@@ -125,7 +186,7 @@ function HeartScene({
     }));
   }, [segmentScores, topK, threshold]);
 
-  // target map: rawName -> intensity
+  // targets to highlight: rawName -> intensity
   const targets = useMemo(() => {
     const map = new Map<string, number>();
     if (!mapping) return map;
@@ -149,25 +210,7 @@ function HeartScene({
     });
   };
 
-  const resolveTarget = (raw: string): THREE.Object3D | null => {
-    // exact
-    const e = nameIndex.get(raw);
-    if (e) return e;
-    // variants
-    for (const v of variants(raw)) {
-      const hit = nameIndex.get(v);
-      if (hit) return hit;
-    }
-    // fuzzy
-    const t = norm(raw);
-    for (const [name, obj] of nameIndex) {
-      const n = norm(name);
-      if (n === t || n.includes(t) || t.includes(n)) return obj;
-    }
-    return null;
-  };
-
-  // fade all then highlight
+  // fade all then highlight targets
   useEffect(() => {
     if (!gltf?.scene) return;
 
@@ -187,10 +230,46 @@ function HeartScene({
     if (misses.length) {
       console.warn(
         `HeartMV: ${misses.length} map target(s) not found in GLB. First few:`,
-        misses.slice(0, 20)
+        misses.slice(0, 12)
       );
     }
   }, [gltf.scene, targets, nameIndex, opacity]);
+
+  // click -> report node + segment + score
+  const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    const obj = e.object as THREE.Object3D;
+    // climb to the closest named ancestor just in case
+    let cur: THREE.Object3D | null = obj;
+    while (cur && !cur.name) cur = cur.parent;
+    const name = (cur?.name || obj.name || "").trim();
+    if (!name) {
+      onSelect(null);
+      return;
+    }
+
+    const key = norm(name);
+    const sids = hitIndex.get(key);
+    if (sids && sids.size) {
+      // pick the highest-scored segment among all mapped sids for this mesh
+      let bestSid: string | undefined;
+      let bestScore = -1;
+      for (const sid of sids) {
+        const sc = Number(segmentScores[sid] ?? 0);
+        if (sc > bestScore) {
+          bestScore = sc;
+          bestSid = sid;
+        }
+      }
+      onSelect({
+        nodeName: name,
+        segmentId: bestSid,
+        score: bestScore >= 0 ? bestScore : undefined,
+      });
+    } else {
+      onSelect({ nodeName: name });
+    }
+  };
 
   // gentle rotation
   useFrame((_, d) => {
@@ -198,12 +277,13 @@ function HeartScene({
   });
 
   return (
-    <group ref={groupRef} dispose={null}>
+    <group ref={groupRef} dispose={null} onPointerDown={handlePointerDown}>
       <primitive object={gltf.scene} />
     </group>
   );
 }
 
+// ---- Wrapper with overlay panel -------------------------------------------
 export default function HeartMV({
   segmentScores,
   topK = 8,
@@ -211,8 +291,10 @@ export default function HeartMV({
   src = DEFAULT_GLB,
   mappingUrl = DEFAULT_MAPPING,
   opacity = 0.15,
+  overallPrediction,
 }: Props) {
   const [mapping, setMapping] = useState<Mapping | null>(null);
+  const [selected, setSelected] = useState<Selection | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -231,7 +313,53 @@ export default function HeartMV({
   }, [mappingUrl]);
 
   return (
-    <div style={{ width: "100%", height: 520 }}>
+    <div style={{ position: "relative", width: "100%", height: 520 }}>
+      {/* overlay info */}
+      <div
+        style={{
+          position: "absolute",
+          left: 12,
+          top: 12,
+          zIndex: 10,
+          background: "rgba(255,255,255,0.8)",
+          backdropFilter: "blur(2px)",
+          border: "1px solid rgba(0,0,0,0.1)",
+          borderRadius: 12,
+          padding: "10px 12px",
+          fontSize: 12,
+          lineHeight: 1.35,
+          pointerEvents: "none",
+        }}
+      >
+        {selected ? (
+          <>
+            <div><b>Node:</b> {selected.nodeName}</div>
+            {selected.segmentId && (
+              <div>
+                <b>Segment:</b> AHA{selected.segmentId} &nbsp;•&nbsp;{" "}
+                <b>Score:</b> {(selected.score ?? 0).toFixed(3)}
+              </div>
+            )}
+            {overallPrediction && (
+              <div>
+                <b>Disease:</b> {overallPrediction}
+              </div>
+            )}
+            {!selected.segmentId && (
+              <div style={{ opacity: 0.75 }}>Not mapped to an AHA segment.</div>
+            )}
+            <div style={{ opacity: 0.6, marginTop: 2 }}>(click another part)</div>
+          </>
+        ) : (
+          <>
+            <div><b>Tip:</b> click a highlighted area</div>
+            {overallPrediction && (
+              <div><b>Disease:</b> {overallPrediction}</div>
+            )}
+          </>
+        )}
+      </div>
+
       <Canvas camera={{ position: [0, 0.2, 1.6], fov: 45 }}>
         <ambientLight intensity={0.6} />
         <directionalLight position={[2, 2, 2]} intensity={0.9} />
@@ -244,6 +372,7 @@ export default function HeartMV({
             src={src}
             mapping={mapping}
             opacity={opacity}
+            onSelect={setSelected}
           />
         </Bounds>
         <OrbitControls enableDamping makeDefault />
