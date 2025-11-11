@@ -1,0 +1,5 @@
+{
+  "class_name_map": { "DCM":"DCM", "HCM":"HCM", "MINF":"MINF", "NOR":"NOR", "RV":"RV" },
+  "roi_space": "AHA16",
+  "voxel_spacing_mm": [1.5,1.5,2.0]
+}

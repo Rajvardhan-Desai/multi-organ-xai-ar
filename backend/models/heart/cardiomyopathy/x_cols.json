@@ -1,0 +1,19 @@
+[
+  "LVEDV","LVESV","LVEF","RVEDV","RVESV","RVEF","LVMass",
+  "SEG1_thkED","SEG1_thkES","SEG1_dThk",
+  "SEG2_thkED","SEG2_thkES","SEG2_dThk",
+  "SEG3_thkED","SEG3_thkES","SEG3_dThk",
+  "SEG4_thkED","SEG4_thkES","SEG4_dThk",
+  "SEG5_thkED","SEG5_thkES","SEG5_dThk",
+  "SEG6_thkED","SEG6_thkES","SEG6_dThk",
+  "SEG7_thkED","SEG7_thkES","SEG7_dThk",
+  "SEG8_thkED","SEG8_thkES","SEG8_dThk",
+  "SEG9_thkED","SEG9_thkES","SEG9_dThk",
+  "SEG10_thkED","SEG10_thkES","SEG10_dThk",
+  "SEG11_thkED","SEG11_thkES","SEG11_dThk",
+  "SEG12_thkED","SEG12_thkES","SEG12_dThk",
+  "SEG13_thkED","SEG13_thkES","SEG13_dThk",
+  "SEG14_thkED","SEG14_thkES","SEG14_dThk",
+  "SEG15_thkED","SEG15_thkES","SEG15_dThk",
+  "SEG16_thkED","SEG16_thkES","SEG16_dThk"
+]

@@ -9,3 +9,5 @@ joblib==1.4.2
 nibabel==5.2.1
 shap==0.46.0
 pyyaml==6.0.2
+xgboost==1.7.6
+scipy

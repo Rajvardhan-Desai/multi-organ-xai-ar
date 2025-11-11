@@ -1,0 +1,20 @@
+{
+  "AHA16": {
+    "1": "Basal Anterior",
+    "2": "Basal Anteroseptal",
+    "3": "Basal Inferoseptal",
+    "4": "Basal Inferior",
+    "5": "Basal Inferolateral",
+    "6": "Basal Anterolateral",
+    "7": "Mid Anterior",
+    "8": "Mid Anteroseptal",
+    "9": "Mid Inferoseptal",
+    "10": "Mid Inferior",
+    "11": "Mid Inferolateral",
+    "12": "Mid Anterolateral",
+    "13": "Apical Anterior",
+    "14": "Apical Septal",
+    "15": "Apical Inferior",
+    "16": "Apical Lateral"
+  }
+}
