@@ -1,7 +1,11 @@
 # EX-AI-AR Project Guide
 
 ## 1. Introduction
-EX-AI-AR couples a FastAPI backend with a Next.js frontend to deliver explainable brain-disease inference using MALPEM segmentations. Users upload `.nii.gz` files, receive classifier outputs plus top contributing ROIs, and view them on interactive 3D/AR brain meshes.
+EX-AI-AR couples a FastAPI backend with a Next.js frontend to deliver explainable multi‑organ inference:
+- Brain (Alzheimer): MALPEM segmentation upload, classifier outputs, and top contributing ROIs highlighted on a 3D/AR brain.
+- Heart (Cardiomyopathy): ED/ES myocardial masks, classifier outputs and AHA16 segment scores highlighted on a 3D heart.
+
+Users upload `.nii/.nii.gz` files, receive predictions with explainability, and visualize results on interactive 3D/AR meshes.
 
 ---
 
@@ -9,17 +13,24 @@ EX-AI-AR couples a FastAPI backend with a Next.js frontend to deliver explainabl
 
 ```
 backend/
-  app.py                  # FastAPI entry point
-  core/                   # ML + data utilities
-  models/...              # Saved ML artifacts (joblib, LUTs)
-  static/...              # GLB assets served by backend
-  requirements.txt        # Backend Python deps
+  app.py                      # FastAPI entry point
+  core/                       # ML + data utilities
+    heart_features.py         # Heart ED/ES feature extraction + AHA16
+    heart_predict.py          # Heart cardiomyopathy predictor
+  models/...                  # Saved ML artifacts (joblib, LUTs)
+  static/
+    brain/brain.glb           # Server-side brain mesh
+    heart/heart.glb           # Server-side heart mesh
+  requirements.txt            # Backend Python deps
 
 frontend/
-  app/                    # Next.js app router pages
-  components/             # UI + visualization widgets
-  public/static/brain/    # Client-side GLB + mappings
-  package.json            # Frontend npm manifest
+  app/                        # Next.js app router pages
+  components/                 # UI + visualization widgets
+    BrainMV.tsx               # Brain <model-viewer> highlighter
+    HeartMV.tsx               # Heart R3F highlighter
+  public/static/brain/        # Client-side brain GLB + mapping
+  public/static/heart/        # Client-side heart GLB + mapping + legend
+  package.json                # Frontend npm manifest
 ```
 
 Ignored paths (node_modules, build artifacts, env files, caches, etc.) are declared in `.gitignore`.
@@ -32,56 +43,64 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 | --- | --- | --- |
 | `model.joblib`, `cn_reference.joblib` | Trained scikit-learn estimator bundle plus optional control-group reference | `backend/models/<organ>/<disease>/` |
 | `lut_parsed.csv` | Label ? brain-region name mapping consumed by feature extraction | same as above |
-| `mapping_lut_to_glb.csv` | Label IDs to GLB nodes for highlight alignment | same as above and mirrored under `frontend/public/static/brain/` |
-| `brain.glb` | 3D mesh used by both React Three Fiber and `<model-viewer>` components | `backend/static/brain/brain.glb` & `frontend/public/static/brain/brain.glb` |
-| `mapping.json` | Rich mapping for `<model-viewer>` (may include multiple mesh targets per label) | `frontend/public/static/brain/mapping.json` |
+| `mapping_lut_to_glb.csv` | Brain: label IDs to GLB nodes for highlight alignment | same as above and mirrored under `frontend/public/static/brain/` |
+| `brain.glb` | Brain 3D mesh for `<model-viewer>` and R3F | `backend/static/brain/brain.glb` & `frontend/public/static/brain/brain.glb` |
+| `mapping.json` | Brain: rich mapping for `<model-viewer>` targets per label | `frontend/public/static/brain/mapping.json` |
+| `heart.glb` | Heart 3D mesh for R3F viewer | `backend/static/heart/heart.glb` & `frontend/public/static/heart/heart.glb` |
+| `mapping.json` | Heart: mapping AHA16 segments → GLB node names | `frontend/public/static/heart/mapping.json` |
+| `legend.json` | Heart: display names for AHA16 segments | `frontend/public/static/heart/legend.json` |
 
 ---
 
 ## 4. Backend Architecture
 
 ### 4.1 App bootstrap (`backend/app.py`)
-- Scans `models/<organ>/<disease>` for `model.joblib` + `lut_parsed.csv`, registers optional `meta.json` and `cn_reference.joblib` (`backend/app.py:33`).
-- Preloads LUTs via `core.lut.load_lut` and model bundles via `core.models.load_model_bundle`, caching everything in memory (`backend/app.py:63`).
-- Allows custom class-name mappings defined in `meta.json` under `class_name_map` (`backend/app.py:71`).
+- Scans `models/<organ>/<disease>` for `model.joblib`, registers optional `lut_parsed.csv` (brain), `meta.json`, `cn_reference.joblib` (`backend/app.py:39`).
+- Preloads model bundles and any LUTs into memory (`backend/app.py:76`).
+- Supports custom class-name mappings via `meta.json.class_name_map` (`backend/app.py:84`).
 
 ### 4.2 REST API
-- `GET /registry`: Enumerates organs and diseases discovered at startup so the frontend can populate selectors (`backend/app.py:91`).
-- `POST /infer`: Accepts `organ`, `disease`, `xai` query params plus a `.nii.gz` upload; runs inference and returns prediction payloads (`backend/app.py:103`).
+- `GET /registry`: Enumerates organs and diseases discovered at startup so the frontend can populate selectors (`backend/app.py:115`).
+- `POST /infer`: Core inference endpoint (`backend/app.py:125`).
+  - Brain: supply `file` (.nii/.nii.gz segmentation). Requires LUT for the selected model.
+  - Heart (cardiomyopathy): prefer `ed_file` and `es_file` (.nii/.nii.gz masks). If only one file is provided, pass it as `file` and it is reused for both ED/ES.
 
-### 4.3 Prediction workflow (`backend/core/predict.py`)
-1. `extract_roi_features` converts the segmentation into ROI volumes, returning both a NumPy array and intracranial volume (ICV) surrogate (`backend/core/features.py:8`).
-2. Features are aligned to the models `x_cols`; missing columns default to zero.
-3. Class probability handling:
-   - Uses `predict_proba` when available (`backend/core/predict.py:101`).
-   - Falls back to deterministic predictions when only `predict` exists.
-4. Label normalization:
-   - Applies `class_name_map` when provided (`backend/core/predict.py:118`).
-   - Falls back to standard CN/AD naming when possible (`backend/core/predict.py:123`).
-5. Explainability:
-   - Uses `feature_importances_` or `coef_` when dimensions align (`backend/core/predict.py:128`).
-   - Otherwise ranks regions by normalized volume as a robust fallback (`backend/core/predict.py:142`).
-6. Response payload includes prediction, probability map, ICV, used feature columns, top regions, and optional XAI metadata.
+### 4.3 Prediction workflow — brain (`backend/core/predict.py`)
+1. `extract_roi_features` returns ROI volumes and an intracranial volume (ICV) surrogate (`backend/core/features.py:8`).
+2. Features align to the model’s `x_cols`; missing columns default to zero.
+3. Probabilities: use `predict_proba` when available (`backend/core/predict.py:99`), otherwise fabricate a deterministic map from `predict`.
+4. Label normalization via `class_name_map` when present (`backend/core/predict.py:112`).
+5. Explainability: use `feature_importances_`/`coef_` if shapes match (`backend/core/predict.py:128`), else fallback to normalized volume ranking (`backend/core/predict.py:142`).
+6. Response includes prediction, probability map, ICV, used features, top regions, and optional XAI metadata.
+
+### 4.4 Prediction workflow — heart (`backend/core/heart_predict.py`)
+- Loads `model.joblib`, `scaler.joblib`, `x_cols.json`, and `xgb_label_map.json` from the model directory.
+- Extracts features from ED/ES masks (volumes, EF, myocardium mass, AHA16 thickness stats) and derives per‑segment scores (`backend/core/heart_features.py`).
+- Predicts robustly across xgboost versions, normalizes probabilities, and returns:
+  - `prediction`, `proba`, `used_features`, `segment_scores`, and optional XAI via Booster gain (`backend/core/heart_predict.py:78`).
 
 ### 4.4 Supporting utilities
 - `core/model_io.py`: Safely unwraps estimators regardless of how the joblib bundle was saved (`backend/core/model_io.py:5`).
 - `core/registry.py`: Discovers required artifacts when pointed at an arbitrary model directory (`backend/core/registry.py:5`).
-- `utils_io.py` and `core/io_utils.py`: Load `.nii.gz` data from bytes or zip members via temp files to satisfy nibabels requirements (`backend/utils_io.py:5`, `backend/core/io_utils.py:1`).
+- `core/mapping.py`: Helpers for reading LUT and LUT→GLB mapping CSVs (`backend/core/mapping.py:1`).
+- `core/aha.py`: AHA16 segment names and intrinsic binning helpers (not directly wired into the current heart pipeline) (`backend/core/aha.py:1`).
+- `utils_io.py` and `core/io_utils.py`: Load `.nii.gz` data from bytes or zip members via temp files to satisfy nibabel’s requirements (`backend/utils_io.py:1`, `backend/core/io_utils.py:1`).
 
 ---
 
 ## 5. Frontend Architecture
 
 ### 5.1 App router page (`frontend/app/page.tsx`)
-- Loads available organs/diseases from `/registry`, falling back to `{ brain: ["alzheimer"] }` if the backend is unreachable (`frontend/app/page.tsx:33`).
-- Maintains state for selected organ/disease, uploaded file, XAI toggle, and inference results.
-- `onInfer` builds a `FormData` request and fetches `/infer`, surfacing JSON directly for transparency (`frontend/app/page.tsx:77`).
-- Highlights top regions in an embedded viewer and prints raw JSON + list view for debugging (`frontend/app/page.tsx:179`).
+- Loads available organs/diseases from `/registry`, falling back to brain+heart defaults if unreachable (`frontend/app/page.tsx:37`).
+- Maintains state for selected organ/disease, uploaded files (brain: one; heart: ED/ES), XAI toggle, and results.
+- `onInfer` builds a `FormData` request per organ and calls `/infer` (`frontend/app/page.tsx:92`).
+- Renders `HeartMV` for heart with `segment_scores`, or `BrainMV` for brain with top regions; prints raw JSON for debugging (`frontend/app/page.tsx:257`).
 
 ### 5.2 Visualization components
-- `BrainMV`: Lazy-loads `@google/model-viewer`, fetches `mapping.json`, fades all materials, then re-highlights those tied to the top regions (`frontend/components/BrainMV.tsx:26`, `frontend/components/BrainMV.tsx:70`).
-- `BrainViewer`: Alternative React Three Fiber viewer that traverses the GLB scene and recolors meshes using emissive highlights (`frontend/components/BrainViewer.tsx:20`, `frontend/components/BrainViewer.tsx:42`).
-- `BarChart`: Simple horizontal bar visualization for ROI contributions (currently unused in the page but available) (`frontend/components/BarChart.tsx:4`).
+- `BrainMV`: Lazy-loads `@google/model-viewer`, fetches `mapping.json`, fades all materials, then re-highlights those tied to top regions (`frontend/components/BrainMV.tsx:26`, `frontend/components/BrainMV.tsx:70`).
+- `HeartMV`: React Three Fiber viewer; loads heart GLB and mapping, fades everything, then highlights nodes mapped from AHA16 segment scores; includes a debug button to dump GLB node names (`frontend/components/HeartMV.tsx:20`, `frontend/app/page.tsx:183`).
+- `BrainViewer`: Alternative R3F brain viewer (not currently mounted in page) (`frontend/components/BrainViewer.tsx:20`).
+- `BarChart`: Simple horizontal bar visualization for ROI contributions (currently unused) (`frontend/components/BarChart.tsx:4`).
 
 ### 5.3 Styling and layout
 - `globals.css` defines basic tokens plus Tailwind-like utility classes to keep JSX concise without installing Tailwind (`frontend/app/globals.css:1`).
@@ -108,18 +127,30 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 - `disease` (string, required)
 - `xai` (bool/int, optional; default `false`)
 
-**Body**
-- multipart/form-data with `file` containing a `.nii` or `.nii.gz` MALPEM segmentation.
+**Body** (multipart/form-data)
+- Brain: `file` — MALPEM `.nii/.nii.gz` segmentation.
+- Heart: `ed_file` and `es_file` — `.nii/.nii.gz` masks. Fallback: single `file` used as both.
 
-**Success response**
+**Success response (brain)**
 ```json
 {
   "prediction": "AD",
   "proba": { "CN": 0.12, "AD": 0.88 },
   "icv_mm3": 1500000,
   "used_features": ["vol_1", "..."],
-  "top_regions": [{ "label_id": 6, "label_name": "Left Amygdala", "score": 0.34 }, ...],
-  "xai": { "method": "feature_importance", "top_regions": [...] }
+  "top_regions": [{ "label_id": 6, "label_name": "Left Amygdala", "score": 0.34 }],
+  "xai": { "method": "feature_importance", "top_regions": [] }
+}
+```
+
+**Success response (heart)**
+```json
+{
+  "prediction": "DCM",
+  "proba": { "HCM": 0.15, "DCM": 0.85 },
+  "used_features": ["LVEDV", "SEG1_thkED", "..."],
+  "segment_scores": { "1": 0.71, "2": 0.63, "...": 0.12 },
+  "xai": { "method": "gain", "top_regions": [{ "label_id": 14, "label_name": "AHA14", "score": 0.12 }] }
 }
 ```
 
@@ -138,8 +169,9 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 4. Launch: `uvicorn app:app --reload --host 0.0.0.0 --port 8000`.
 
 **Model onboarding**
-- Copy trained artifacts into `backend/models/<organ>/<disease>/` with at least `model.joblib` and `lut_parsed.csv`.
-- Optional files: `meta.json` (with `class_name_map`, preprocessing hints), `cn_reference.joblib`, `shap_background.npy`, `preproc.json`.
+- Brain: copy `model.joblib` and `lut_parsed.csv` into `backend/models/<organ>/<disease>/`.
+- Heart: copy `model.joblib`, `scaler.joblib`, `x_cols.json`, `xgb_label_map.json` into `backend/models/heart/cardiomyopathy/`.
+- Optional: `meta.json` (`class_name_map`), `cn_reference.joblib`, `shap_background.npy`, `preproc.json` (currently informational; `backend/registry.yaml` is not consumed by the app).
 - Restart the backend to pick up new directories.
 
 ### 7.2 Frontend
@@ -175,7 +207,7 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 
 ### 8.3 Security & Compliance
 - Enforce HTTPS.
-- Restrict allowed origins in FastAPI `CORSMiddleware` (`backend/app.py:17`) for production.
+- Restrict allowed origins in FastAPI `CORSMiddleware` for production (`backend/app.py:21`).
 - Validate uploads (size limits, MIME) before storing; optionally add antivirus or sandbox scanning.
 
 ---
@@ -184,7 +216,7 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 
 1. **New organs/diseases**: drop additional directories in `backend/models/<organ>/<disease>`, add associated LUT/mapping files, restart backend.
 2. **Custom explainability**: augment `predict` to call SHAP, LIME, or Grad-CAM; store background datasets (e.g., `shap_background.npy`) noted in `registry.yaml`.
-3. **Alternative viewers**: expose `BrainViewer` on the frontend to offer a React Three Fiber mode; reuse existing `weightsByLabel` API.
+3. **Alternative viewers**: expose `BrainViewer` on the frontend to offer a React Three Fiber mode; reuse existing `weightsByLabel` API. `HeartMV` is already R3F-based.
 4. **UI polish**: integrate `BarChart` next to JSON to highlight top ROIs with bars instead of raw text.
 5. **Preprocessing**: describe pre-processing steps (normalization, smoothing) in `preproc.json` and teach the backend to apply them before inference.
 
@@ -197,14 +229,16 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 | `/registry` returns `{ "organs": [] }` | No valid model directories or missing `model.joblib`/`lut_parsed.csv` | Confirm directory structure and filenames, then restart backend (`backend/app.py:33`) |
 | `/infer` responds 404 Model not found | Organ/disease params mismatch exactly loaded keys | Check casing and spelling; inspect server logs printed during `_scan_models` |
 | `/infer` 500 Inference error: ... nibabel... | Uploaded file not NIfTI or corrupt | Validate local `.nii.gz` and ensure MALPEM label set matches LUT |
-| Viewer shows no highlights | `mapping.json` or `mapping_lut_to_glb.csv` lacking entries for top label IDs | Extend mappings; check console warnings from `BrainMV` (`frontend/components/BrainMV.tsx:130`) |
+| Viewer shows no highlights (brain) | Brain mapping missing entries | Extend brain `mapping.json`; check console warnings from `BrainMV` (`frontend/components/BrainMV.tsx:141`) |
+| Viewer shows no highlights (heart) | Heart mapping missing entries or mismatched node names | Extend heart `mapping.json`; use the page “Debug: Dump GLB names” button to inspect names (`frontend/app/page.tsx:183`) |
+| Heart 400 “Provide ed_file and es_file...” | Missing ED/ES uploads | Upload both masks, or provide a single file in `file` which is reused for ED/ES |
 | CLIs claim `guide.md` missing | File not created (especially in read-only setups) | Create locally before running `pandoc` |
 
 ---
 
 ## 11. Useful Commands
 
-- List tracked files (respects `.gitignore`): `rg --files`
+- List tracked files (respects `.gitignore`): `git ls-files` (or `rg --files` if available)
 - Inspect NIfTI metadata quickly:
   ```python
   python - <<'PY'
