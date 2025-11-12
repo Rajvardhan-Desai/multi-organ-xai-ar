@@ -164,7 +164,7 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 
 ### 7.1 Backend
 1. `cd backend`
-2. `python -m venv .venv && .\\.venv\\Scripts\\activate` (Windows) or `source .venv/bin/activate` (Unix).
+2. `py -3.11 -m venv .venv && .\\.venv\\Scripts\\activate` (Windows cmd) or `source .venv/bin/activate` (Unix).
 3. `pip install -r requirements.txt`.
 4. Launch: `uvicorn app:app --reload --host 0.0.0.0 --port 8000`.
 
