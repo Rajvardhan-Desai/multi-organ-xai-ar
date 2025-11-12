@@ -97,12 +97,14 @@ export default function Page() {
       const fd = new FormData();
 
       if (organ === "heart") {
-        if (!edFile && !file) throw new Error("Please choose ED mask (.nii/.nii.gz) for heart.");
+        if (!edFile && !file)
+          throw new Error("Please choose ED mask (.nii/.nii.gz) for heart.");
         if (edFile) fd.append("ed_file", edFile);
         if (esFile) fd.append("es_file", esFile ?? edFile ?? (file as File));
         if (!edFile && file) fd.append("file", file);
       } else {
-        if (!file) throw new Error("Please choose a segmentation file (.nii/.nii.gz).");
+        if (!file)
+          throw new Error("Please choose a segmentation file (.nii/.nii.gz).");
         fd.append("file", file);
       }
 
@@ -192,35 +194,73 @@ export default function Page() {
       {organ === "heart" ? (
         <div className="flex flex-col lg:flex-row items-start gap-4">
           <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium">ED mask (.nii/.nii.gz)</label>
-            <input type="file" accept=".nii,.nii.gz" onChange={(e) => setEdFile(e.target.files?.[0] ?? null)} />
+            <label className="text-sm font-medium">
+              ED mask (.nii/.nii.gz)
+            </label>
+            <input
+              type="file"
+              accept=".nii,.nii.gz"
+              onChange={(e) => setEdFile(e.target.files?.[0] ?? null)}
+            />
           </div>
           <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium">ES mask (.nii/.nii.gz)</label>
-            <input type="file" accept=".nii,.nii.gz" onChange={(e) => setEsFile(e.target.files?.[0] ?? null)} />
-            <div className="text-xs text-gray-500">Optional — if omitted, ED will be reused.</div>
+            <label className="text-sm font-medium">
+              ES mask (.nii/.nii.gz)
+            </label>
+            <input
+              type="file"
+              accept=".nii,.nii.gz"
+              onChange={(e) => setEsFile(e.target.files?.[0] ?? null)}
+            />
+            <div className="text-xs text-gray-500">
+              Optional — if omitted, ED will be reused.
+            </div>
           </div>
-          <button className="bg-black text-white rounded px-4 py-2 disabled:opacity-50" onClick={onInfer} disabled={busy || (!edFile && !file)}>
+          <button
+            className="bg-black text-white rounded px-4 py-2 disabled:opacity-50"
+            onClick={onInfer}
+            disabled={busy || (!edFile && !file)}
+          >
             {busy ? "Running…" : "Run Inference"}
           </button>
         </div>
       ) : (
         <div className="flex flex-col md:flex-row items-start gap-3">
           <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium">Segmentation (.nii/.nii.gz)</label>
-            <input type="file" accept=".nii,.nii.gz" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+            <label className="text-sm font-medium">
+              Segmentation (.nii/.nii.gz)
+            </label>
+            <input
+              type="file"
+              accept=".nii,.nii.gz"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
           </div>
-          <button className="bg-black text-white rounded px-4 py-2 disabled:opacity-50" onClick={onInfer} disabled={busy || !file}>
+          <button
+            className="bg-black text-white rounded px-4 py-2 disabled:opacity-50"
+            onClick={onInfer}
+            disabled={busy || !file}
+          >
             {busy ? "Running…" : "Run Inference"}
           </button>
         </div>
       )}
 
-      {error && <div className="text-red-600 text-sm border border-red-200 bg-red-50 p-3 rounded">{error}</div>}
+      {error && (
+        <div className="text-red-600 text-sm border border-red-200 bg-red-50 p-3 rounded">
+          {error}
+        </div>
+      )}
 
       <div className="border rounded-lg p-3">
         {organ === "heart" ? (
-          <HeartMV segmentScores={result?.segment_scores ?? {}} topK={8} threshold={0.25} />
+          <HeartMV
+            enableAR
+            segmentScores={result?.segment_scores ?? {}}
+            topK={8}
+            threshold={0.25}
+            overallPrediction={result?.prediction || undefined} // <— NEW
+          />
         ) : (
           <BrainMV affected={(affectedBrain ?? []).slice(0, 3)} />
         )}
@@ -253,7 +293,8 @@ export default function Page() {
               <ul className="text-sm list-disc pl-6">
                 {(affectedBrain ?? []).map((r) => (
                   <li key={r.label_id}>
-                    <b>#{r.label_id}</b> {r.label_name} — score {r.score.toFixed(6)}
+                    <b>#{r.label_id}</b> {r.label_name} — score{" "}
+                    {r.score.toFixed(6)}
                   </li>
                 ))}
               </ul>
