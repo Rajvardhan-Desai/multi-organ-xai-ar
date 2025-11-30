@@ -1,0 +1,26 @@
+{
+  "I": [
+    { "target": "Posterior_segment_of_liver_(I)" }
+  ],
+  "II": [
+    { "target": "Left_posterior_lateral_segment_of_liver_(II)" }
+  ],
+  "III": [
+    { "target": "Left_anterior_lateral_segment_of_liver_(III)" }
+  ],
+  "IV": [
+    { "target": "Left_medial_segment_of_liver_(IV)" }
+  ],
+  "V": [
+    { "target": "Anterior_medial_segment_of_liver_(V)" }
+  ],
+  "VI": [
+    { "target": "Anterior_lateral_segment_of_liver_(VI)" }
+  ],
+  "VII": [
+    { "target": "Posterior_lateral_segment_of_liver_(VII)" }
+  ],
+  "VIII": [
+    { "target": "Posterior_medial_segment_of_liver_(VIII)" }
+  ]
+}

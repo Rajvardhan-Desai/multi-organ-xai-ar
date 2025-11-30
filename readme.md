@@ -1,11 +1,17 @@
 # EX-AI-AR Project Guide
 
 ## 1. Introduction
-EX-AI-AR couples a FastAPI backend with a Next.js frontend to deliver explainable multi‑organ inference:
+EX-AI-AR couples a FastAPI backend with a Next.js frontend to deliver explainable multi-organ inference:
 - Brain (Alzheimer): MALPEM segmentation upload, classifier outputs, and top contributing ROIs highlighted on a 3D/AR brain.
 - Heart (Cardiomyopathy): ED/ES myocardial masks, classifier outputs and AHA16 segment scores highlighted on a 3D heart.
+- Liver (Fibrosis/Cirrhosis): single-channel abdominal CT volumes scored by a Torch 3D ResNet with per-Couinaud Grad-CAM overlays on a 3D liver mesh.
 
 Users upload `.nii/.nii.gz` files, receive predictions with explainability, and visualize results on interactive 3D/AR meshes.
+
+### Disease analysis vs. predictive analysis
+- **Disease analysis** uses data to understand, detect, or classify disease presence, type, or stage. It extracts patterns that help clinicians reason about risk factors or progression.
+  - Examples: classify MRI scans as healthy vs. diseased, detect diabetic retinopathy in eye images, or identify pneumonia from chest X-rays.
+- **Predictive analysis** focuses on forecasting future outcomes. It uses historical data to predict whether a patient may develop a condition, how a disease might progress, or the likely treatment response/survival rate.
 
 ---
 
@@ -17,10 +23,12 @@ backend/
   core/                       # ML + data utilities
     heart_features.py         # Heart ED/ES feature extraction + AHA16
     heart_predict.py          # Heart cardiomyopathy predictor
-  models/...                  # Saved ML artifacts (joblib, LUTs)
+    liver_predict.py          # Liver fibrosis Torch pipeline + Grad-CAM
+  models/...                  # Saved ML artifacts (joblib, LUTs, Torch checkpoints)
   static/
     brain/brain.glb           # Server-side brain mesh
     heart/heart.glb           # Server-side heart mesh
+    liver/liver.glb           # Server-side liver mesh
   requirements.txt            # Backend Python deps
 
 frontend/
@@ -28,8 +36,10 @@ frontend/
   components/                 # UI + visualization widgets
     BrainMV.tsx               # Brain <model-viewer> highlighter
     HeartMV.tsx               # Heart R3F highlighter
+    liverMV.tsx               # Liver R3F highlighter with Couinaud segments
   public/static/brain/        # Client-side brain GLB + mapping
   public/static/heart/        # Client-side heart GLB + mapping + legend
+  public/static/liver/        # Client-side liver GLB + Couinaud mappings
   package.json                # Frontend npm manifest
 ```
 
@@ -49,6 +59,9 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 | `heart.glb` | Heart 3D mesh for R3F viewer | `backend/static/heart/heart.glb` & `frontend/public/static/heart/heart.glb` |
 | `mapping.json` | Heart: mapping AHA16 segments → GLB node names | `frontend/public/static/heart/mapping.json` |
 | `legend.json` | Heart: display names for AHA16 segments | `frontend/public/static/heart/legend.json` |
+| `best_model.pth` | Torch ResNet3D checkpoint for liver fibrosis/cirrhosis | `backend/models/liver/fibrosis/best_model.pth` |
+| `liver.glb` | Liver Couinaud mesh for the R3F viewer | `backend/static/liver/liver.glb` & `frontend/public/static/liver/liver.glb` |
+| `mapping.json` | Liver: Couinaud segment → GLB node mapping used by `LiverMV` | `frontend/public/static/liver/mapping.json` |
 
 ---
 
@@ -64,6 +77,7 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 - `POST /infer`: Core inference endpoint (`backend/app.py:125`).
   - Brain: supply `file` (.nii/.nii.gz segmentation). Requires LUT for the selected model.
   - Heart (cardiomyopathy): prefer `ed_file` and `es_file` (.nii/.nii.gz masks). If only one file is provided, pass it as `file` and it is reused for both ED/ES.
+  - Liver (fibrosis/cirrhosis): supply a single `file` (.nii/.nii.gz CT or CT-like volume). The backend looks up `models/liver/fibrosis/best_model.pth` and emits Grad-CAM Couinaud segment scores when `xai=1`.
 
 ### 4.3 Prediction workflow — brain (`backend/core/predict.py`)
 1. `extract_roi_features` returns ROI volumes and an intracranial volume (ICV) surrogate (`backend/core/features.py:8`).
@@ -79,7 +93,13 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 - Predicts robustly across xgboost versions, normalizes probabilities, and returns:
   - `prediction`, `proba`, `used_features`, `segment_scores`, and optional XAI via Booster gain (`backend/core/heart_predict.py:78`).
 
-### 4.4 Supporting utilities
+### 4.5 Prediction workflow — liver (`backend/core/liver_predict.py`)
+- `ResNet3D_1ch` reuses `torchvision.models.video.r3d_18`, converts the first convolution to single-channel, and swaps the FC head to two classes before loading `best_model.pth`.
+- `_infer_on_nii` writes uploads to disk if needed, loads NIfTI volumes, creates a naive liver mask, resizes to `64³`, z-scores, then runs inference on CPU/GPU to emit `Healthy` vs `Cirrhosis` probabilities.
+- `LiverCamGrad` hooks `layer4` activations/gradients to compute 3D Grad-CAM and `_segment_scores_from_mask_array` averages activations within an 8-way pseudo Couinaud segmentation for explainability overlays.
+- `predict_liver_fibrosis` is the FastAPI wrapper that persists uploads to a temp file, calls `_infer_on_nii`, returns `segment_scores`, `xai.hotspots`, and cleans temp artifacts. The backend auto-registers this predictor when `models/liver/fibrosis/best_model.pth` is present.
+
+### 4.6 Supporting utilities
 - `core/model_io.py`: Safely unwraps estimators regardless of how the joblib bundle was saved (`backend/core/model_io.py:5`).
 - `core/registry.py`: Discovers required artifacts when pointed at an arbitrary model directory (`backend/core/registry.py:5`).
 - `core/mapping.py`: Helpers for reading LUT and LUT→GLB mapping CSVs (`backend/core/mapping.py:1`).
@@ -93,12 +113,13 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 ### 5.1 App router page (`frontend/app/page.tsx`)
 - Loads available organs/diseases from `/registry`, falling back to brain+heart defaults if unreachable (`frontend/app/page.tsx:37`).
 - Maintains state for selected organ/disease, uploaded files (brain: one; heart: ED/ES), XAI toggle, and results.
-- `onInfer` builds a `FormData` request per organ and calls `/infer` (`frontend/app/page.tsx:92`).
-- Renders `HeartMV` for heart with `segment_scores`, or `BrainMV` for brain with top regions; prints raw JSON for debugging (`frontend/app/page.tsx:257`).
+- `onInfer` builds a `FormData` request per organ and calls `/infer`, sending ED/ES pairs for heart, and single-volume CT uploads for liver (`frontend/app/page.tsx:92`).
+- Renders `HeartMV` for heart with `segment_scores`, `LiverMV` for liver Grad-CAM Couinaud scores, or `BrainMV` for brain with top regions; prints raw JSON for debugging (`frontend/app/page.tsx:257`).
 
 ### 5.2 Visualization components
 - `BrainMV`: Lazy-loads `@google/model-viewer`, fetches `mapping.json`, fades all materials, then re-highlights those tied to top regions (`frontend/components/BrainMV.tsx:26`, `frontend/components/BrainMV.tsx:70`).
 - `HeartMV`: React Three Fiber viewer; loads heart GLB and mapping, fades everything, then highlights nodes mapped from AHA16 segment scores; includes a debug button to dump GLB node names (`frontend/components/HeartMV.tsx:20`, `frontend/app/page.tsx:183`).
+- `LiverMV`: React Three Fiber viewer for Couinaud segments; maps Grad-CAM `segment_scores` (roman numerals) to GLB nodes, fades untouched nodes, and exposes a console helper to inspect node names (`frontend/components/liverMV.tsx`).
 - `BrainViewer`: Alternative R3F brain viewer (not currently mounted in page) (`frontend/components/BrainViewer.tsx:20`).
 - `BarChart`: Simple horizontal bar visualization for ROI contributions (currently unused) (`frontend/components/BarChart.tsx:4`).
 
@@ -130,6 +151,7 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 **Body** (multipart/form-data)
 - Brain: `file` — MALPEM `.nii/.nii.gz` segmentation.
 - Heart: `ed_file` and `es_file` — `.nii/.nii.gz` masks. Fallback: single `file` used as both.
+- Liver: `file` — `.nii/.nii.gz` CT volume (single-channel). No ED/ES distinction.
 
 **Success response (brain)**
 ```json
@@ -154,8 +176,23 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 }
 ```
 
+**Success response (liver)**
+```json
+{
+  "prediction": "Cirrhosis",
+  "proba": { "Healthy": 0.12, "Cirrhosis": 0.88 },
+  "segment_scores": { "I": 0.42, "II": 0.12, "III": 0.61 },
+  "xai": {
+    "method": "gradcam3d",
+    "hotspots": [{ "segment": "VIII", "score": 0.78 }],
+    "top_regions": [{ "label_id": 1, "label_name": "Segment I", "score": 0.42 }]
+  }
+}
+```
+
 **Error responses**
 - 404 if organ/disease not registered.
+- 400 if the required uploads are missing (ED/ES for heart, CT volume for liver, segmentation for brain).
 - 500 with `"detail": "Inference error: ..."` for corrupted uploads or execution faults.
 
 ---
@@ -165,12 +202,13 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 ### 7.1 Backend
 1. `cd backend`
 2. `py -3.11 -m venv .venv && .\\.venv\\Scripts\\activate` (Windows cmd) or `source .venv/bin/activate` (Unix).
-3. `pip install -r requirements.txt`.
+3. `pip install -r requirements.txt` (then install `torch` + `torchvision` per https://pytorch.org/get-started/locally/ so the liver predictor can import `torchvision.models.video.r3d_18`).
 4. Launch: `uvicorn app:app --reload --host 0.0.0.0 --port 8000`.
 
 **Model onboarding**
 - Brain: copy `model.joblib` and `lut_parsed.csv` into `backend/models/<organ>/<disease>/`.
 - Heart: copy `model.joblib`, `scaler.joblib`, `x_cols.json`, `xgb_label_map.json` into `backend/models/heart/cardiomyopathy/`.
+- Liver: copy `best_model.pth` (Torch checkpoint) into `backend/models/liver/fibrosis/` and ensure the same directory exists before booting the app.
 - Optional: `meta.json` (`class_name_map`), `cn_reference.joblib`, `shap_background.npy`, `preproc.json` (currently informational; `backend/registry.yaml` is not consumed by the app).
 - Restart the backend to pick up new directories.
 
@@ -186,9 +224,9 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 1. Start backend and frontend dev servers.
 2. Open the frontend in a browser.
 3. Select organ/disease (auto-populated).
-4. Upload a MALPEM `.nii.gz` file.
+4. Upload the files required for the selected organ (brain: MALPEM segmentation; heart: ED/ES masks or single fallback file; liver: CT volume).
 5. Toggle XAI if desired and click Run Inference.
-6. Review JSON output, top regions list, and highlighted 3D brain.
+6. Review JSON output, top regions/segments list, and highlighted 3D brain/heart/liver meshes.
 
 ---
 
@@ -203,7 +241,7 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 ### 8.2 Frontend
 - `npm run build` produces a `.next` production build.
 - Deploy via Vercel, Netlify, or any Node hosting. Ensure `NEXT_PUBLIC_BACKEND` is set in deployment environment variables.
-- Serve `/public/static/brain/*` as static assets so GLB and mappings load without CORS issues.
+- Serve `/public/static/{brain,heart,liver}/*` as static assets so GLB and mappings load without CORS issues.
 
 ### 8.3 Security & Compliance
 - Enforce HTTPS.
@@ -216,9 +254,10 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 
 1. **New organs/diseases**: drop additional directories in `backend/models/<organ>/<disease>`, add associated LUT/mapping files, restart backend.
 2. **Custom explainability**: augment `predict` to call SHAP, LIME, or Grad-CAM; store background datasets (e.g., `shap_background.npy`) noted in `registry.yaml`.
-3. **Alternative viewers**: expose `BrainViewer` on the frontend to offer a React Three Fiber mode; reuse existing `weightsByLabel` API. `HeartMV` is already R3F-based.
-4. **UI polish**: integrate `BarChart` next to JSON to highlight top ROIs with bars instead of raw text.
-5. **Preprocessing**: describe pre-processing steps (normalization, smoothing) in `preproc.json` and teach the backend to apply them before inference.
+3. **Custom liver segmentation**: plug a better Couinaud mapper into `_make_pseudo_couinaud_mask` or ship precomputed masks alongside uploads, then surface richer overlays through `segment_scores`.
+4. **Alternative viewers**: expose `BrainViewer` on the frontend to offer a React Three Fiber mode; reuse existing `weightsByLabel` API. `HeartMV` is already R3F-based.
+5. **UI polish**: integrate `BarChart` next to JSON to highlight top ROIs with bars instead of raw text.
+6. **Preprocessing**: describe pre-processing steps (normalization, smoothing) in `preproc.json` and teach the backend to apply them before inference.
 
 ---
 
@@ -231,7 +270,10 @@ Ignored paths (node_modules, build artifacts, env files, caches, etc.) are decla
 | `/infer` 500 Inference error: ... nibabel... | Uploaded file not NIfTI or corrupt | Validate local `.nii.gz` and ensure MALPEM label set matches LUT |
 | Viewer shows no highlights (brain) | Brain mapping missing entries | Extend brain `mapping.json`; check console warnings from `BrainMV` (`frontend/components/BrainMV.tsx:141`) |
 | Viewer shows no highlights (heart) | Heart mapping missing entries or mismatched node names | Extend heart `mapping.json`; use the page “Debug: Dump GLB names” button to inspect names (`frontend/app/page.tsx:183`) |
+| Viewer shows no highlights (liver) | `segment_scores` keys mismatch mapping JSON or node names changed in GLB | Keep Couinaud IDs as roman numerals (`"I"`..`"VIII"`), update `frontend/public/static/liver/mapping.json`, and call `window.liverDump()` from DevTools to inspect node names |
 | Heart 400 “Provide ed_file and es_file...” | Missing ED/ES uploads | Upload both masks, or provide a single file in `file` which is reused for ED/ES |
+| Liver 400 “Provide 'file' (.nii/.nii.gz) for liver inference.” | Upload missing/empty | Upload a valid CT volume; confirm backend logs show `models/liver/fibrosis/best_model.pth` loaded |
+| RuntimeError: `torchvision.models.video.r3d_18...` | PyTorch/TorchVision not installed in backend venv | Install compatible `torch`/`torchvision` wheels (CPU/GPU) after `pip install -r requirements.txt` |
 | CLIs claim `guide.md` missing | File not created (especially in read-only setups) | Create locally before running `pandoc` |
 
 ---

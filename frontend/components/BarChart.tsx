@@ -9,7 +9,7 @@ export default function BarChart({items}:{items:Item[]}) {
       <div style={{display:"flex",flexDirection:"column",gap:8}}>
         {items.map((i,idx)=>{
           const w=Math.round(Math.abs(i.score)/max*100);
-          const sign=i.score>=0?"+":"−";
+          const sign=i.score>=0?"+":"-";
           return (
             <div key={idx}>
               <div style={{display:"flex",justifyContent:"space-between"}}>

@@ -18,6 +18,10 @@ from core.predict import predict            # brain path: uses class_name_map & 
 # New heart predictor
 from core.heart_predict import predict_heart_cardio
 
+# New liver predictor
+from core.liver_predict import predict_liver_fibrosis   # <-- add this
+
+
 app = FastAPI(title="EX-AI-AR Backend")
 app.add_middleware(
     CORSMiddleware,
@@ -108,6 +112,18 @@ for key, paths in PATHS.items():
           f"(predict_proba={has_proba}), keys={list(bundle.keys())}")
 
     MODELS[key] = bundle
+    
+    LIVER_MODEL_CKPT = BASE_DIR / "models" / "liver" / "fibrosis" / "best_model.pth"
+
+    if LIVER_MODEL_CKPT.exists():
+        key = ("liver", "fibrosis")
+        MODELS[key] = {
+            "_kind": "liver_fibrosis",
+            "_ckpt": str(LIVER_MODEL_CKPT),
+        }
+        print("[models] liver/fibrosis: Torch 3D model:", LIVER_MODEL_CKPT)
+    else:
+        print("[models] liver/fibrosis: checkpoint not found, skipping registration.")
 
 # -----------------------------------------------------------------------------
 # Public endpoints
@@ -133,12 +149,22 @@ async def infer(
     es_file: UploadFile | None = File(default=None),
     xai: bool = Query(False),
 ):
-    key = (organ, disease)
-    if key not in MODELS:
+    organ_l = organ.lower()
+    disease_l = disease.lower()
+    canonical_disease = "fibrosis" if organ_l == "liver" and disease_l == "cirrhosis" else disease_l
+
+    key: Optional[Tuple[str, str]] = None
+    for registered_key in MODELS.keys():
+        r_organ, r_disease = registered_key
+        if r_organ.lower() == organ_l and r_disease.lower() == canonical_disease:
+            key = registered_key
+            break
+
+    if key is None:
         raise HTTPException(status_code=404, detail="Model not found for organ/disease")
 
     # -------- HEART: cardiomyopathy (expects masks; LUT not needed) --------
-    if organ.lower() == "heart" and disease.lower() == "cardiomyopathy":
+    if organ_l == "heart" and canonical_disease == "cardiomyopathy":
         # Accept ED/ES separately; allow fallback: single file used as both
         if ed_file is None and file is None:
             raise HTTPException(400, "Provide ed_file and es_file or a single 'file' for fallback.")
@@ -172,6 +198,25 @@ async def infer(
             raise
         except Exception as e:
             return JSONResponse(status_code=500, content={"detail": f"Inference error: {e}"})
+
+    # -------- LIVER: fibrosis / cirrhosis (single CT volume) --------
+    if organ_l == "liver" and canonical_disease == "fibrosis":
+        if file is None:
+            raise HTTPException(400, "Provide 'file' (.nii/.nii.gz) for liver inference.")
+        try:
+            contents = await file.read()
+            if not contents:
+                raise HTTPException(400, "Upload is empty.")
+            ckpt_path = MODELS[key]["_ckpt"]
+            payload = predict_liver_fibrosis(ckpt_path, contents, want_xai=xai)
+            return payload
+        except HTTPException:
+            raise
+        except Exception as e:
+            return JSONResponse(
+                status_code=500,
+                content={"detail": f"Inference error (liver): {e}"},
+            )
 
     # -------- BRAIN (legacy path): needs LUT + single file --------
     if file is None:
@@ -207,3 +252,4 @@ async def infer(
         raise
     except Exception as e:
         return JSONResponse(status_code=500, content={"detail": f"Inference error: {e}"})
+

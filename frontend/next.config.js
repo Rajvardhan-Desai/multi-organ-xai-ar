@@ -1,3 +1,15 @@
+const path = require("path");
+
 /** @type {import('next').NextConfig} */
-const nextConfig = { reactStrictMode: true };
+const nextConfig = {
+  reactStrictMode: true,
+  webpack: (config) => {
+    config.resolve.alias = {
+      ...(config.resolve.alias || {}),
+      three: path.resolve(__dirname, "node_modules/three"),
+    };
+    return config;
+  },
+};
+
 module.exports = nextConfig;
